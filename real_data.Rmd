@@ -1,0 +1,691 @@
+---
+title: "real_data"
+author: "Asantewaa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Introduction
+
+This document looks at the performance of Difference-in-Means (DM) , Ordinary Least Squares (OLS), Inverse Propensity Weighting (IPW), One-Step Estimation and Targeted Maximum Likelihood Estimation estimators on real data, focusing on calculation the average treatment effect of the different treatments $T$ on outcome $Y$.
+
+## Simulation Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(broom)
+library(MASS)  
+library(survey)
+library(randomForest)
+library(gbm)
+set.seed(123)  
+```
+
+## Data
+
+```{r}
+library(readr)
+data <- read_csv(url("https://raw.githubusercontent.com/tlverse/tlverse-data/master/wash-benefits/washb_data.csv"))
+```
+
+```{r}
+str(data)
+```
+
+```{r}
+head(data)
+```
+
+```{r}
+info <- function(df) {
+  info_df <- data.frame(
+    Column = names(df),
+    Class = sapply(df, class),
+    NonNA = sapply(df, function(x) sum(!is.na(x)))
+  )
+  print(info_df)
+}
+info(data)
+```
+
+```{r}
+unique(data$tr)
+unique(data$fracode)
+```
+
+```{r}
+missing_values <- colSums(is.na(data))
+missing_values[missing_values > 0]
+```
+
+```{r}
+data_n_ <- data %>%
+  rename(T = tr, Y = whz)
+str(data_n_)
+```
+
+```{r}
+treatment_count <- table(data_n_$T)
+
+
+data_n <- data_n_[, !names(data) %in% c("momage", "momheight")]
+
+print(treatment_count)
+```
+
+Control vs Each Treatment
+
+```{r}
+# Treatments : ("Control", "Nutrition", "Water", "Sanitation", "Handwashing", "Nutrition + WSH", "WSH"))
+
+filtered_data_CN <- data_n %>%
+  filter(T %in% c("Control", "Nutrition")) %>%
+  mutate(T = ifelse(T == "Control", 0, 1))
+
+filtered_data_CW <- data_n %>%
+  filter(T %in% c("Control", "Water")) %>%
+  mutate(T = ifelse(T == "Control", 0, 1))
+
+filtered_data_CS <- data_n %>%
+  filter(T %in% c("Control", "Sanitation")) %>%
+  mutate(T = ifelse(T == "Control", 0, 1))
+
+filtered_data_CH <- data_n %>%
+  filter(T %in% c("Control", "Handwashing")) %>%
+  mutate(T = ifelse(T == "Control", 0, 1))
+
+filtered_data_CNWSH <- data_n %>%
+  filter(T %in% c("Control", "Nutrition + WSH")) %>%
+  mutate(T = ifelse(T == "Control", 0, 1))
+
+filtered_data_CWSH <- data_n %>%
+  filter(T %in% c("Control", "WSH")) %>%
+  mutate(T = ifelse(T == "Control", 0, 1))
+
+```
+
+Treatment Against Each Other
+
+```{r}
+
+# Treatments : ("Control", "Nutrition", "Water", "Sanitation", "Handwashing", "Nutrition + WSH", "WSH"))
+
+filtered_data_NW <- data_n %>%
+  filter(T %in% c("Nutrition", "Water")) %>%
+  mutate(T = ifelse(T == "Nutrition", 0, 1))
+
+filtered_data_NS <- data_n %>%
+  filter(T %in% c("Nutrition", "Sanitation")) %>%
+  mutate(T = ifelse(T == "Nutrition", 0, 1))
+
+filtered_data_NH <- data_n %>%
+  filter(T %in% c("Nutrition", "Handwashing")) %>%
+  mutate(T = ifelse(T == "Nutrition", 0, 1))
+
+filtered_data_NNWSH <- data_n %>%
+  filter(T %in% c("Nutrition", "Nutrition + WSH")) %>%
+  mutate(T = ifelse(T == "Nutrition", 0, 1))
+
+filtered_data_N_WSH <- data_n %>%
+  filter(T %in% c("Nutrition", "WSH")) %>%
+  mutate(T = ifelse(T == "Nutrition", 0, 1))
+
+filtered_data_WS <- data_n %>%
+  filter(T %in% c("Water", "Sanitation")) %>%
+  mutate(T = ifelse(T == "Water", 0, 1))
+
+filtered_data_WH <- data_n %>%
+  filter(T %in% c("Water", "Handwashing")) %>%
+  mutate(T = ifelse(T == "Water", 0, 1))
+
+filtered_data_WNSH <- data_n %>%
+  filter(T %in% c("Water", "Nutrition + WSH")) %>%
+  mutate(T = ifelse(T == "Water", 0, 1))
+
+filtered_data_WWSH <- data_n %>%
+  filter(T %in% c("Water", "WSH")) %>%
+  mutate(T = ifelse(T == "Water", 0, 1))
+
+filtered_data_SH <- data_n %>%
+  filter(T %in% c("Sanitation", "Handwashing")) %>%
+  mutate(T = ifelse(T == "Sanitation", 0, 1))
+'
+filtered_data_SNWSH <- data_n %>%'
+  filter(T %in% c("Sanitation", "Nutrition + WSH")) %>%
+  mutate(T = ifelse(T == "Sanitation", 0, 1))
+
+filtered_data_SWSH <- data_n %>%
+  filter(T %in% c("Sanitation", "WSH")) %>%
+  mutate(T = ifelse(T == "Sanitation", 0, 1))
+
+filtered_data_HNWSH <- data_n %>%
+  filter(T %in% c("Handwashing", "Nutrition + WSH")) %>%
+  mutate(T = ifelse(T == "Handwashing", 0, 1))
+
+filtered_data_HWSH <- data_n %>%
+  filter(T %in% c("Handwashing", "WSH")) %>%
+  mutate(T = ifelse(T == "Handwashing", 0, 1))
+
+filtered_data_NWSHWSH <- data_n %>%
+  filter(T %in% c("Nutrition + WSH", "WSH")) %>%
+  mutate(T = ifelse(T == "Nutrition + WSH", 0, 1))
+
+```
+
+### DM Estimator and Confidence Intervals
+
+```{r}
+estimate_dm <- function(data) {
+  treated <- data[data$T == 1, "Y", drop = TRUE]
+  control <- data[data$T == 0, "Y", drop = TRUE]
+  est <- mean(treated) - mean(control)
+  se <- sqrt(var(treated) / length(treated) + var(control) / length(control))
+  ci <- c(est - 1.96 * se, est + 1.96 * se)
+  list(estimate = est, se = se, ci_lower = ci[1], ci_upper = ci[2])
+}
+estimate_dm(filtered_data_CN)
+```
+
+### OLS Estimator and Confidence Intervals
+
+```{r}
+estimate_ols <- function(data) {
+  covariates <- setdiff(names(data), c("T", "Y"))
+  formula <- as.formula(paste("Y ~ T +", paste(covariates, collapse = " + ")))
+  
+  model <- lm(formula, data = data)
+  coef_est <- coef(summary(model))["T", ]
+  ci <- confint(model, "T", level = 0.95)
+  list(estimate = coef_est["Estimate"], se = coef_est["Std. Error"], ci_lower = ci[1], ci_upper = ci[2])
+}
+estimate_ols(filtered_data_CN)
+```
+
+### IPW Estimator and Confidence Intervals
+
+```{r}
+estimate_ipw <- function(data) {
+  covariates <- setdiff(names(data), c("T", "Y"))
+  formula <- as.formula(paste("T ~", paste(covariates, collapse = " + ")))
+  
+  propensity_model <- glm(formula, family = binomial(link = "logit"), data = data)
+  
+  data$weights <- ifelse(data$T == 1, 
+                         1 / predict(propensity_model, type = "response", newdata = data),
+                         1 / (1 - predict(propensity_model, type = "response", newdata = data)))
+  
+  ipw_design <- svydesign(ids = ~1, weights = ~weights, data = data)
+  
+  ipw_result <- svyglm(Y ~ T, design = ipw_design)
+  
+  coef_ipw <- coef(ipw_result)
+  se_ipw <- sqrt(diag(vcov(ipw_result)))
+  
+  ci_ipw <- coef_ipw["T"] + c(-1.96, 1.96) * se_ipw["T"]
+  list(estimate = coef_ipw["T"], 
+       se = se_ipw["T"], 
+       ci_lower = ci_ipw[1], 
+       ci_upper = ci_ipw[2])
+}
+estimate_ipw(filtered_data_CN)
+```
+
+### OSE Estimator and Confidence Intervals
+
+```{r}
+estimate_ose <- function(data) {
+
+  covariates <- setdiff(names(data), c("T", "Y"))
+  outcome_formula <- as.formula(paste("Y ~ T +", paste(covariates, collapse = " + ")))
+  propensity_formula <- as.formula(paste("T ~", paste(covariates, collapse = " + ")))
+
+
+  # Initial estimation
+  rf_model <- randomForest(outcome_formula, data = data)
+  data$Q0W <- predict(rf_model, newdata = data.frame(T = 0, data[, covariates]))
+  data$Q1W <- predict(rf_model, newdata = data.frame(T = 1, data[, covariates]))
+
+  
+  g_init <- glm(propensity_formula, family = binomial, data = data)
+  data$g1W <- predict(g_init, type = "response")
+  data$g0W <- 1 - data$g1W
+  
+  data$H1 <- data$T / data$g1W
+  data$H0 <- (1 - data$T) / data$g0W
+  
+  data$IF <- (data$H1 - data$H0) * (data$Y - (data$T * data$Q1W + (1 - data$T) * data$Q0W)) + (data$Q1W - data$Q0W)
+  
+  ATE <- mean(data$IF)
+  SE <- sd(data$IF) / sqrt(nrow(data))
+  CI_lower <- ATE - 1.96 * SE
+  CI_upper <- ATE + 1.96 * SE
+  
+  return(list(estimate = ATE, se = SE, ci_lower = CI_lower, ci_upper = CI_upper))
+}
+
+estimate_ose(filtered_data_CN)
+
+```
+
+### TMLE Estimator and Confidence Interval
+
+```{r}
+estimate_tmle <- function(data) {
+  
+  covariates <- setdiff(names(data), c("T", "Y"))
+  outcome_formula <- as.formula(paste("Y ~ T +", paste(covariates, collapse = " + ")))
+  propensity_formula <- as.formula(paste("T ~", paste(covariates, collapse = " + ")))
+  
+  # Initial estimation
+  rf_model <- randomForest(outcome_formula, data = data)
+  data$Q0W <- predict(rf_model, newdata = data.frame(T = 0, data[, covariates]))
+  data$Q1W <- predict(rf_model, newdata = data.frame(T = 1, data[, covariates]))
+  
+  g_init <- glm(propensity_formula, family = binomial, data = data)
+  data$g1W <- predict(g_init, type = "response")
+  data$g0W <- 1 - data$g1W
+
+  data$H1 <- data$T / data$g1W
+  data$H0 <- (1 - data$T) / data$g0W
+
+  second_stage <- lm(Y ~ -1 + H1 + H0, offset = T*data$Q1W + (1-T)*data$Q0W, data = data, weights = rep(1, nrow(data)))
+  epsilon <- coef(second_stage)
+
+  data$Q0W_star <- data$Q0W + epsilon["H0"] * (1 - data$T) / data$g0W
+  data$Q1W_star <- data$Q1W + epsilon["H1"] * data$T / data$g1W
+
+  data$IF <- (data$H1 - data$H0) * (data$Y - (data$T * data$Q1W_star + (1 - data$T) * data$Q0W_star)) + (data$Q1W_star - data$Q0W_star)
+  
+  ATE <- mean(data$Q1W_star - data$Q0W_star)
+  SE <- sd(data$IF) / sqrt(nrow(data))
+  CI_lower <- ATE - 1.96 * SE
+  CI_upper <- ATE + 1.96 * SE
+  
+  return(list(estimate = ATE, se = SE, ci_lower = CI_lower, ci_upper = CI_upper))
+}
+
+estimate_tmle(filtered_data_CN)
+
+```
+
+```{r}
+library(moments) 
+compare_estimators <- function(data) {
+  
+  dm_results <- estimate_dm(data)
+  ols_results <- estimate_ols(data)
+  ipw_results <- estimate_ipw(data)
+  ose_results <- estimate_ose(data)
+  tmle_results <- estimate_tmle(data)
+  
+  results_df <- data.frame(
+        Estimator = c("DM", "OLS", "IPW", "OSE", "TMLE"),
+        Estimate = c(dm_results$estimate, ols_results$estimate, ipw_results$estimate, ose_results$estimate, tmle_results$estimate),
+        CI_Width = c(dm_results$ci_upper - dm_results$ci_lower, ols_results$ci_upper - ols_results$ci_lower, ipw_results$ci_upper - ipw_results$ci_lower, ose_results$ci_upper - ose_results$ci_lower, tmle_results$ci_upper - tmle_results$ci_lower)
+    )
+
+  return(results_df)
+  
+}
+
+results_df_CN <- compare_estimators(filtered_data_CN)
+results_df_CH <- compare_estimators(filtered_data_CH)
+results_df_CS <- compare_estimators(filtered_data_CS)
+results_df_CW <- compare_estimators(filtered_data_CW)
+results_df_CNWSH <- compare_estimators(filtered_data_CNWSH)
+results_df_CWSH <- compare_estimators(filtered_data_CWSH)
+
+results_df_NW <- compare_estimators(filtered_data_NW)
+results_df_NS <- compare_estimators(filtered_data_NS)
+results_df_NH <- compare_estimators(filtered_data_NH)
+results_df_NNWSH <- compare_estimators(filtered_data_NNWSH)
+results_df_N_WSH <- compare_estimators(filtered_data_N_WSH)
+results_df_WS <- compare_estimators(filtered_data_WS)
+results_df_WH <- compare_estimators(filtered_data_WH)
+results_df_WNSH <- compare_estimators(filtered_data_WNSH)
+results_df_WWSH <- compare_estimators(filtered_data_WWSH)
+results_df_SH <- compare_estimators(filtered_data_SH)
+results_df_SNWSH <- compare_estimators(filtered_data_SNWSH)
+results_df_SWSH <- compare_estimators(filtered_data_SWSH)
+results_df_HNWSH <- compare_estimators(filtered_data_HNWSH)
+results_df_HWSH <- compare_estimators(filtered_data_HWSH)
+results_df_NWSHWSH <- compare_estimators(filtered_data_NWSHWSH)
+```
+
+## Table and Plots
+
+```{r}
+
+#ATE of DM ,IPW ,OLS, OSE and TMLE Estimators on Real Data
+
+summary_table <- results_df_CN %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Control vs Nutrition")
+
+summary_table <- results_df_CH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Control vs Handwashing")
+
+summary_table <- results_df_CS %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Control vs Sanitation")
+
+summary_table <- results_df_CW %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Control vs Water")
+
+summary_table <- results_df_CNWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Control vs Nutrition + WSH")
+
+summary_table <- results_df_CWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Control vs WSH")
+```
+
+```{r}
+summary_table <- results_df_NW %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Nutrition vs Water")
+
+summary_table <- results_df_NS %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Nutrition vs Sanitation")
+
+summary_table <- results_df_NH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Nutrition vs Handwashing")
+
+summary_table <- results_df_NNWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Nutrition vs Nutrition + WSH")
+
+summary_table <- results_df_N_WSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Nutrition vs WSH")
+
+summary_table <- results_df_WS %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Water vs Sanitation")
+
+summary_table <- results_df_WH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Water vs Handwashing")
+
+summary_table <- results_df_WNSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Water vs Nutrition + WSH")
+
+summary_table <- results_df_WWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Water vs WSH")
+
+summary_table <- results_df_SH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Sanitation vs Handwashing")
+
+summary_table <- results_df_SNWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Sanitation vs Nutrition + WSH")
+
+summary_table <- results_df_SWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Sanitation vs WSH")
+
+summary_table <- results_df_HNWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Handwashing vs Nutrition + WSH")
+
+summary_table <- results_df_HWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Handwashing vs WSH")
+
+summary_table <- results_df_NWSHWSH %>%
+  group_by(Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_table, caption = "Nutrition + WSH vs WSH")
+```
+
+Control vs Each Treatment
+
+```{r}
+
+#Confidence Intervals of Estimates by Estimator
+
+ggplot(results_df_CH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Control vs Handwashing", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_CN, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Control vs Nutrition ", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_CNWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Control vs Nutrition + WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_CS, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Control vs Sanitaion", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_CW, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Control vs Water", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_CWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Control vs WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+```
+
+Treatment Against Each Other
+
+```{r}
+ggplot(results_df_NW, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Nutrition vs Water", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_NS, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Nutrition vs Sanitation ", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_NH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Nutrition vs Handwashing", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_NNWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Nutrition vs Nutrition + WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_N_WSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Nutrition vs WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_WS, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Water vs Sanitation", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+ggplot(results_df_WH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Water vs Handwashing", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_WNSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Water vs Nutrition + WSH ", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_WWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Water vs WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_SH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Sanitation vs Handwashing", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_SNWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Sanitation vs Nutrition + WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_SWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Sanitation vs WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_HNWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Handwashing vs Nutrition + WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_HWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Handwashing vs WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+
+ggplot(results_df_NWSHWSH, aes(x = Estimator, y = Estimate, ymin = Estimate - CI_Width/2, ymax = Estimate + CI_Width/2, color = Estimator)) +
+  geom_pointrange() +
+  labs(title = "Confidence Intervals - Nutrition + WSH vs WSH", x = "Estimator", y = "Estimate") +
+  theme_minimal() 
+```

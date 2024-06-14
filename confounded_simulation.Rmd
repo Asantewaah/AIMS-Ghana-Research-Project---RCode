@@ -1,0 +1,416 @@
+---
+title: "second"
+author: "Asantewaa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Introduction
+
+This document looks at the performance of Difference-in-Means (DM) , Ordinary Least Squares (OLS) and Inverse Propensity Weighting estimators on both confounded and unconfounded data across various sample sizes, focusing on their bias, variance, estimation accuracy, coverage, and confidence interval width of the average causal effect of treatment $T$ on outcome $Y$.
+
+## Simulation Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(broom)
+library(MASS)  
+library(survey)
+set.seed(123)  
+```
+
+## Data Generation
+
+The following data is generated, representing scenarios that are both confounded and unconfounded:
+
+-   Covariate $W$: $W \sim N(0,1)$.
+-   Treatment $T$:
+    -   Confounded: $T$ depends on $W$, modeled by $\text{Prob}(T = 1 | W) = \frac{1}{1 + e^{-(0.3 - 0.5 \cdot W)}}$.
+-   Outcome $Y$: $Y \sim \mathcal{N} (e^{a + b\cdot T +c\cdot W + d\cdot W \cdot T},1)$.
+
+```{r}
+a <- 1
+b <- -10
+c <- 1
+d <- 1
+
+sample_sizes <- c(100, 500, 1000, 5000, 10000, 50000,100000,500000)
+```
+
+### 1. Objective Understanding
+
+-   $a$ (Intercept): Adjusting $a$ shifts the baseline level of $Y$ for all observations when $T=0$ and $W=0$.
+-   $b$ (Treatment effect): $b$ directly influences the impact of the treatment $T$ on $Y$. A higher absolute value of $b$ increases the treatment effect magnitude.
+-   $c$ (Covariate effect): $c$ modifies how the covariate $W$ affects $Y$. Altering $c$ helps analyze how sensitivity to $W$ changes the outcome.
+-   $d$ (Interaction effect): $d$ represents the interaction between $T$ and $W$, helping to evaluate whether the effect of $T$ on $Y$ changes with different levels of $W$.
+
+### Confounded Data
+
+```{r}
+generate_confounded_data <- function(n) {
+  W <- rnorm(n)
+  T <- rbinom(n, 1, prob = 1 / (1 + exp(-0.3 + 0.5 * W)))
+  Y <- rnorm(n, mean = exp(a + b*T +c*W + d*W*T), sd = 1)
+  data.frame(W = W, T = T, Y = Y)
+}
+```
+
+### Unconfounded Data
+
+```{r}
+generate_unconfounded_data <- function(n) {
+  W <- rnorm(n)
+  T <- rbinom(n, 1, 0.5)
+  Y <- rnorm(n, mean = exp(a + b*T +c*W + d*W*T), sd = 1)
+  data.frame(W = W, T = T, Y = Y)
+}
+```
+
+## Plotting Functions
+
+```{r}
+confounded_data <- generate_confounded_data(1000)
+unconfounded_data <- generate_unconfounded_data(1000)
+
+confounded_data$Scenario <- 'Confounded'
+unconfounded_data$Scenario <- 'Unconfounded'
+combined_data <- rbind(confounded_data, unconfounded_data)
+
+ggplot(combined_data, aes(x = W, y = Y, color = as.factor(T))) +
+  geom_point(alpha = 0.5) +
+  facet_grid(. ~ Scenario) +  
+  labs(title = "Comparison of Y against W under different scenarios",
+       x = "Covariate W",
+       y = "Outcome Y",
+       color = "Treatment Status (T)") +
+  theme_minimal() +
+  scale_color_manual(values = c("0" = "cyan", "1" = "violet"))
+```
+
+## Estimation Functions
+
+### DM Estimator and Confidence Intervals
+
+```{r}
+estimate_dm <- function(data) {
+  treated <- data[data$T == 1, "Y"]
+  control <- data[data$T == 0, "Y"]
+  est <- mean(treated) - mean(control)
+  se <- sqrt(var(treated) / length(treated) + var(control) / length(control))
+  ci <- c(est - 1.96 * se, est + 1.96 * se)
+  list(estimate = est, se = se, ci_lower = ci[1], ci_upper = ci[2])
+}
+```
+
+### OLS Estimator and Confidence Intervals
+
+```{r}
+estimate_ols <- function(data) {
+  model <- lm(Y ~ T + W + T*W, data = data)
+  coef_est <- coef(summary(model))["T", ]
+  ci <- confint(model, "T", level = 0.95)
+  list(estimate = coef_est["Estimate"], se = coef_est["Std. Error"], ci_lower = ci[1], ci_upper = ci[2])
+}
+```
+
+### IPW Estimator and Confidence Intervals
+
+```{r}
+estimate_ipw <- function(data) {
+  propensity_model <- glm(T ~ W, family = binomial(link = "logit"), data = data)
+  
+  data$weights <- ifelse(data$T == 1, 
+                         1 / predict(propensity_model, type = "response", newdata = data),
+                         1 / (1 - predict(propensity_model, type = "response", newdata = data)))
+  
+  ipw_design <- svydesign(ids = ~1, weights = ~weights, data = data)
+  
+  ipw_result <- svyglm(Y ~ T, design = ipw_design)
+  
+  coef_ipw <- coef(ipw_result)
+  se_ipw <- sqrt(diag(vcov(ipw_result)))
+  
+  ci_ipw <- coef_ipw["T"] + c(-1.96, 1.96) * se_ipw["T"]
+  list(estimate = coef_ipw["T"], 
+       se = se_ipw["T"], 
+       ci_lower = ci_ipw[1], 
+       ci_upper = ci_ipw[2])
+}
+```
+
+The Problematic IPW
+
+```{r}
+estimate_ipw_ <- function(data) {
+  
+  count_table <-  table(data$T)
+  
+  data$weights <- ifelse(data$T == 1,count_table["1"]/nrow(data),
+                        count_table["0"]/nrow(data) )
+  
+  ipw_design <- svydesign(ids = ~1, weights = ~weights, data = data)
+  
+  ipw_result <- svyglm(Y ~ T, design = ipw_design)
+  
+  coef_ipw <- coef(ipw_result)
+  se_ipw <- sqrt(diag(vcov(ipw_result)))
+  
+  ci_ipw <- coef_ipw["T"] + c(-1.96, 1.96) * se_ipw["T"]
+  list(estimate = coef_ipw["T"], 
+       se = se_ipw["T"], 
+       ci_lower = ci_ipw[1], 
+       ci_upper = ci_ipw[2])
+}
+
+```
+
+## True Causal Effect
+
+### Derivation of the Average Treatment Effect (ATE)
+
+Objective: To compute the average treatment effect (ATE) $\tau$ defined as the expected difference in outcomes between two treatment.
+
+#### Definition:
+
+The ATE, $\tau$, is defined as follows: $$
+\tau = \mathbb{E}[Y(1) - Y(0)]
+$$ where $Y(t)$ is the outcome under treatment $t$.
+
+#### Using the Law of Total Expectation:
+
+Expanding $\tau$ using the law of total expectation gives: $$
+\tau = \mathbb{E}[Y|T=1] - \mathbb{E}[Y|T=0]
+$$ Further, by conditioning on an additional covariate $W$, we have: $$
+\tau = \mathbb{E}\left[\mathbb{E}[Y|T=1,W]\right] - \mathbb{E}\left[\mathbb{E}[Y|T=0,W]\right]
+$$
+
+#### Model Specification:
+
+Taking the outcome $Y$ modeled as: $$
+Y = \exp(a + bT + cW + dWT)
+$$ and the covariate $W$ follows a standard normal distribution: $$
+p(W) = \frac{1}{\sqrt{2\pi}} e^{-\frac{W^2}{2}}
+$$
+
+#### Calculation:
+
+To find $\mathbb{E}[Y|T=t,W]$, we integrate over $W$: $$
+\mathbb{E}\left[\mathbb{E}[Y|T=t,W]\right] = \int \exp(a + bt + cw + dwt) \cdot p(w) \, dw
+$$ $$
+= \frac{1}{\sqrt{2\pi}} \int \exp\left(a + bt + cw + dwt - \frac{w^2}{2}\right) dw
+$$
+
+#### Completing the Square:
+
+By simplifying the exponent using the completing the square methods: $$
+a + bt + cw + dwt - \frac{w^2}{2} = -\frac{1}{2}(w - (c + dt))^2 + \left(a + bt + \frac{(c + dt)^2}{2}\right)
+$$ Integrating this expression over $w$ with the completed square gives us: $$
+\frac{1}{\sqrt{2\pi}} \int \exp\left(-\frac{1}{2}(w - (c + dt))^2 + \left(a + bt + \frac{(c + dt)^2}{2}\right)\right) dw = e^{a + bt + \frac{(c + dt)^2}{2}}
+$$
+
+#### Final Expression for ATE:
+
+Thus, the expressions for $\mathbb{E}[Y|T=1]$ and $\mathbb{E}[Y|T=0]$ are: $$
+\mathbb{E}[Y|T=1] = e^{a + b + \frac{(c + d)^2}{2}}, \quad \mathbb{E}[Y|T=0] = e^{a + \frac{c^2}{2}}
+$$ Subtracting these, the ATE is given by: $$
+\tau = e^{a + b + \frac{(c + d)^2}{2}} - e^{a + \frac{c^2}{2}}
+$$
+
+```{r}
+true_effect <- exp(a+b+((c+d)^2)/2) - exp(a+(c^2)/2)
+true_effect
+```
+
+### Simulation
+
+```{r}
+compare_estimators <- function(sample_sizes, num_sim = 200, scenario = "confounded") {
+  results_list <- vector("list", length(sample_sizes))
+  names(results_list) <- as.character(sample_sizes)
+  
+  for (size_index in seq_along(sample_sizes)) {
+    n <- sample_sizes[size_index]
+    dm_estimates <- numeric(num_sim)
+    ols_estimates <- numeric(num_sim)
+    ipw_estimates <- numeric(num_sim)
+    dm_coverage <- numeric(num_sim)
+    ols_coverage <- numeric(num_sim)
+    ipw_coverage <- numeric(num_sim)
+    dm_ci_widths <- numeric(num_sim)
+    ols_ci_widths <- numeric(num_sim)
+    ipw_ci_widths <- numeric(num_sim)
+    
+    for (i in 1:num_sim) {
+      if (scenario == "confounded") {
+        data <- generate_confounded_data(n)
+      } else {
+        data <- generate_unconfounded_data(n)
+      }
+      
+      dm_results <- estimate_dm(data)
+      ols_results <- estimate_ols(data)
+      ipw_results <- estimate_ipw_(data)
+      
+      dm_estimates[i] <- dm_results$estimate
+      ols_estimates[i] <- ols_results$estimate
+      ipw_estimates[i] <- ipw_results$estimate
+      
+      dm_coverage[i] <- (true_effect >= dm_results$ci_lower) & (true_effect <= dm_results$ci_upper)
+      ols_coverage[i] <- (true_effect >= ols_results$ci_lower) & (true_effect <= ols_results$ci_upper)
+      ipw_coverage[i] <- (true_effect >= ipw_results$ci_lower) & (true_effect <= ipw_results$ci_upper)
+      
+      dm_ci_widths[i] <- dm_results$ci_upper - dm_results$ci_lower
+      ols_ci_widths[i] <- ols_results$ci_upper - ols_results$ci_lower
+      ipw_ci_widths[i] <- ipw_results$ci_upper - ipw_results$ci_lower
+    }
+    
+    dm_variance <- var(dm_estimates)
+    ols_variance <- var(ols_estimates)
+    ipw_variance <- var(ipw_estimates)
+    
+    dm_rmse <- sqrt(mean((dm_estimates - true_effect)^2))
+    ols_rmse <- sqrt(mean((ols_estimates - true_effect)^2))
+    ipw_rmse <- sqrt(mean((ipw_estimates - true_effect)^2))
+    
+    results_list[[size_index]] <- data.frame(
+      Sample_Size = rep(n, 3),
+      Estimator = rep(c("DM", "OLS", "IPW"), each = num_sim),
+      Estimate = c(dm_estimates, ols_estimates, ipw_estimates),
+      Variance = c(rep(dm_variance, num_sim), rep(ols_variance, num_sim), rep(ipw_variance, num_sim)),
+      RMSE = c(rep(dm_rmse, num_sim), rep(ols_rmse, num_sim), rep(ipw_rmse, num_sim)),
+      Coverage = c(dm_coverage, ols_coverage, ipw_coverage),
+      CI_Width = c(dm_ci_widths, ols_ci_widths, ipw_ci_widths)
+    )
+  }
+  
+  results_df <- do.call(rbind, results_list)
+  return(results_df)
+}
+
+results_df_conf <- compare_estimators(sample_sizes,num_sim = 200, scenario = "confounded") 
+```
+
+## Simulations and Plots
+
+## Unconfounded
+
+```{r}
+summary_df_unconf <- compare_estimators(sample_sizes,num_sim = 200, scenario = "unconfounded")  %>%
+  group_by(Sample_Size, Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Bias = mean(Estimate - true_effect),
+    Variance = mean(Variance),
+    Bias.to.se = Bias/sqrt(Variance),
+    RMSE = mean(RMSE),
+    Coverage = mean(Coverage),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_df_unconf, caption = "Performance Metrics for DM ,IPW and OLS Estimators Across Different Sample Sizes(Unconfounded)")
+```
+
+```{r}
+# Select dataset
+summary_df <- summary_df_unconf
+
+# Bias Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Bias, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Bias Across Sample Sizes", x = "Log of Sample Size", y = "Bias")
+
+# Variance Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Variance, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Variance Across Sample Sizes", x = "Log of Sample Size", y = "Variance")
+
+# Bias.to.se Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Bias.to.se, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Bias-to-se Ratio Across Sample Sizes", x = "Log of Sample Size", y = "Bias.to.se")
+
+# RMSE Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = RMSE, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "RMSE Across Sample Sizes", x = "Log of Sample Size", y = "RMSE")
+
+# Coverage Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Coverage, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Coverage Probability Across Sample Sizes", x = "Log of Sample Size", y = "Coverage")
+
+# Confidence Interval Width Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Mean_CI_Width, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Confidence Interval Width Across Sample Sizes", x = "Log of Sample Size", y = "CI Width")
+```
+
+### Confounded
+
+```{r}
+summary_df_conf <- results_df_conf %>%
+  group_by(Sample_Size, Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Bias = abs(mean(Estimate - true_effect)),
+    Variance = mean(Variance),
+    Bias.to.se = Bias/sqrt(Variance),
+    RMSE = mean(RMSE),
+    Coverage = mean(Coverage),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_df_conf, caption = "Performance Metrics for DM, OLS and IPW Estimators Across Different Sample Sizes(Confounded)")
+```
+
+```{r}
+# Select dataset
+summary_df <- summary_df_conf
+
+# Bias Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Bias, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Bias Across Sample Sizes", x = "Log of Sample Size", y = "Bias")
+
+# Variance Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Variance, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Variance Across Sample Sizes", x = "Log of Sample Size", y = "Variance")
+
+# Bias.to.se Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Bias.to.se, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Bias-to-se Ratio Across Sample Sizes", x = "Log of Sample Size", y = "Bias.to.se")
+
+# RMSE Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = RMSE, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "RMSE Across Sample Sizes", x = "Log of Sample Size", y = "RMSE")
+
+# Coverage Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Coverage, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Coverage Probability Across Sample Sizes", x = "Log of Sample Size", y = "Coverage")
+
+# Confidence Interval Width Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Mean_CI_Width, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Confidence Interval Width Across Sample Sizes", x = "Log of Sample Size", y = "CI Width")
+```

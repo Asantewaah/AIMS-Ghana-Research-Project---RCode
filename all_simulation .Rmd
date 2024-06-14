@@ -1,0 +1,410 @@
+---
+title: "all"
+author: "Asantewaa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Introduction
+
+This document looks at the performance of parametric estimators vs semi-parametric estimators with different initial estimators on confounded data across various sample sizes, focusing on their bias, variance, estimation accuracy, coverage, and confidence interval width of the average causal effect of treatment $T$ on outcome $Y$.
+
+## Simulation Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(broom)
+library(MASS)  
+library(survey)
+library(tmle)
+set.seed(123)  
+```
+
+## Data Generation
+
+The following data is generated, representing scenarios that are both confounded and unconfounded:
+
+-   Covariate $W$: $W \sim N(0,1)$.
+-   Treatment $T$:
+    -   Confounded: $T$ depends on $W$, modeled by $\text{Prob}(T = 1 | W) = \frac{1}{1 + e^{-(0.3 - 0.5 \cdot W)}}$.
+    -   Unconfounded: $T$ is independent of $W$, with a fixed probability $\text{Prob}(T = 1) = \frac{1}{1 + e^{-0.3}}$ or $0.5$ since the common fair choice is a 50/50 chance of getting either treatment
+-   Outcome $Y$: $Y \sim \mathcal{N} (e^{a + b\cdot T +c\cdot W + d\cdot W \cdot T},1)$.
+
+```{r}
+a <- 1
+b <- -10
+c <- 1
+d <- 1
+
+sample_sizes <- c(100, 500, 1000, 5000, 10000, 50000, 100000, 500000)
+```
+
+### 1. Objective Understanding
+
+-   $a$ (Intercept): Adjusting $a$ shifts the baseline level of $Y$ for all observations when $T=0$ and $W=0$.
+-   $b$ (Treatment effect): $b$ directly influences the impact of the treatment $T$ on $Y$. A higher absolute value of $b$ increases the treatment effect magnitude.
+-   $c$ (Covariate effect): $c$ modifies how the covariate $W$ affects $Y$. Altering $c$ helps analyze how sensitivity to $W$ changes the outcome.
+-   $d$ (Interaction effect): $d$ represents the interaction between $T$ and $W$, helping to evaluate whether the effect of $T$ on $Y$ changes with different levels of $W$.
+
+### Confounded Data
+
+```{r}
+generate_confounded_data <- function(n) {
+  W <- rnorm(n)
+  T <- rbinom(n, 1, prob = 1 / (1 + exp(-0.3 + 0.5 * W)))
+  Y <- rnorm(n, mean = exp(a + b*T +c*W + d*W*T), sd = 1)
+  data.frame(W = W, T = T, Y = Y)
+}
+```
+
+```{r}
+n <- 100000  
+data <- generate_confounded_data(n)
+```
+
+### DM Estimator and Confidence Intervals
+
+```{r}
+estimate_dm <- function(data) {
+  treated <- data[data$T == 1, "Y"]
+  control <- data[data$T == 0, "Y"]
+  est <- mean(treated) - mean(control)
+  se <- sqrt(var(treated) / length(treated) + var(control) / length(control))
+  ci <- c(est - 1.96 * se, est + 1.96 * se)
+  list(estimate = est, se = se, ci_lower = ci[1], ci_upper = ci[2])
+}
+```
+
+### OLS Estimator and Confidence Intervals
+
+```{r}
+estimate_ols <- function(data) {
+  model <- lm(Y ~ T + W + T*W, data = data)
+  coef_est <- coef(summary(model))["T", ]
+  ci <- confint(model, "T", level = 0.95)
+  list(estimate = coef_est["Estimate"], se = coef_est["Std. Error"], ci_lower = ci[1], ci_upper = ci[2])
+}
+```
+
+### IPW Estimator and Confidence Intervals
+
+```{r}
+estimate_ipw <- function(data) {
+  
+  propensity_model <- glm(T ~ W, family = binomial(link = "logit"), data = data)
+  
+  data$weights <- ifelse(data$T == 1, 
+                         1 / predict(propensity_model, type = "response", newdata = data),
+                         1 / (1 - predict(propensity_model, type = "response", newdata = data)))
+  
+  ipw_design <- svydesign(ids = ~1, weights = ~weights, data = data)
+  
+  ipw_result <- svyglm(Y ~ T, design = ipw_design)
+  
+  coef_ipw <- coef(ipw_result)
+  se_ipw <- sqrt(diag(vcov(ipw_result)))
+  
+  ci_ipw <- coef_ipw["T"] + c(-1.96, 1.96) * se_ipw["T"]
+  list(estimate = coef_ipw["T"], 
+       se = se_ipw["T"], 
+       ci_lower = ci_ipw[1], 
+       ci_upper = ci_ipw[2])
+}
+```
+
+The Problematic IPW
+
+```{r}
+estimate_ipw_ <- function(data) {
+  
+  count_table <-  table(data$T)
+  
+  data$weights <- ifelse(data$T == 1,count_table["1"]/nrow(data),
+                        count_table["0"]/nrow(data) )
+  
+  ipw_design <- svydesign(ids = ~1, weights = ~weights, data = data)
+  
+  ipw_result <- svyglm(Y ~ T, design = ipw_design)
+  
+  coef_ipw <- coef(ipw_result)
+  se_ipw <- sqrt(diag(vcov(ipw_result)))
+  
+  ci_ipw <- coef_ipw["T"] + c(-1.96, 1.96) * se_ipw["T"]
+  list(estimate = coef_ipw["T"], 
+       se = se_ipw["T"], 
+       ci_lower = ci_ipw[1], 
+       ci_upper = ci_ipw[2])
+}
+
+```
+
+### OSE Estimator and Confidence Intervals
+
+```{r}
+estimate_ose <- function(data) {
+  
+  lm_model <- lm(Y ~ T + W + T*W, data = data)
+  data$Q0W <- predict(lm_model, newdata = data.frame(T = 0, W = data$W))
+  data$Q1W <- predict(lm_model, newdata = data.frame(T = 1, W = data$W))
+  
+  g_init <- glm(T ~ W, family = binomial, data = data)
+  data$g1W <- predict(g_init, type = "response")
+  data$g0W <- 1 - data$g1W
+  
+  data$H1 <- data$T / data$g1W
+  data$H0 <- (1 - data$T) / data$g0W
+  
+  data$IF <- (data$H1 - data$H0) * (data$Y - (data$T * data$Q1W + (1 - data$T) * data$Q0W)) + (data$Q1W - data$Q0W)
+  
+  ATE <- mean(data$IF)
+  SE <- sd(data$IF) / sqrt(nrow(data))
+  CI_lower <- ATE - 1.96 * SE
+  CI_upper <- ATE + 1.96 * SE
+  
+  return(list(estimate = ATE, se = SE, ci_lower = CI_lower, ci_upper = CI_upper))
+}
+
+```
+
+### TMLE Estimator and Confidence Interval
+
+```{r}
+estimate_tmle <- function(data) {
+  Q_init <- lm(Y ~ T + W + T * W, data = data)
+
+  data$Q0W <- predict(Q_init, newdata = data.frame(T = 0, W = data$W))
+  data$Q1W <- predict(Q_init, newdata = data.frame(T = 1, W = data$W))
+  
+  g_init <- glm(T ~ W, family = binomial, data = data)
+  data$g1W <- predict(g_init, type = "response")
+  data$g0W <- 1 - data$g1W
+
+  data$H1 <- data$T / data$g1W
+  data$H0 <- (1 - data$T) / data$g0W
+
+  second_stage <- lm(Y ~ -1 + H1 + H0, offset = T*data$Q1W + (1-T)*data$Q0W, data = data, weights = rep(1, nrow(data)))
+  epsilon <- coef(second_stage)
+
+  data$Q0W_star <- data$Q0W + epsilon["H0"] * (1 - data$T) / data$g0W
+  data$Q1W_star <- data$Q1W + epsilon["H1"] * data$T / data$g1W
+
+  data$IF <- (data$H1 - data$H0) * (data$Y - (data$T * data$Q1W_star + (1 - data$T) * data$Q0W_star)) + (data$Q1W_star - data$Q0W_star)
+  
+  ATE <- mean(data$Q1W_star - data$Q0W_star)
+  SE <- sd(data$IF) / sqrt(nrow(data))
+  CI_lower <- ATE - 1.96 * SE
+  CI_upper <- ATE + 1.96 * SE
+  
+  return(list(estimate = ATE, se = SE, ci_lower = CI_lower, ci_upper = CI_upper))
+}
+
+estimate_tmle(data)
+```
+
+```{r}
+estimate_wtmle <- function(data) {
+  Q_init <- lm(Y ~ T + W + T * W, data = data)
+
+  data$Q0W <- predict(Q_init, newdata = data.frame(T = 0, W = data$W))
+  data$Q1W <- predict(Q_init, newdata = data.frame(T = 1, W = data$W))
+  
+  g_init <- glm(T ~ W, family = binomial, data = data)
+  data$g1W <- predict(g_init, type = "response")
+  data$g0W <- 1 - data$g1W
+
+  data$H1 <- data$T
+  data$H0 <- (data$T - 1) 
+  
+  data$GW <- data$T / data$g1W + (1 - data$T) / data$g0W
+
+  second_stage <- lm(Y ~ -1 + H1 + H0, offset = T*data$Q1W + (1-T)*data$Q0W, data = data, weights = data$GW )
+  epsilon <- coef(second_stage)
+
+  data$Q0W_star <- data$Q0W + epsilon["H0"] * (data$T - 1) 
+  data$Q1W_star <- data$Q1W + epsilon["H1"] * data$T 
+
+  data$IF <- (data$H1 + data$H0) * (data$Y - (data$T * data$Q1W_star + (1 - data$T) * data$Q0W_star)) + (data$Q1W_star - data$Q0W_star)
+  
+  ATE <- mean(data$Q1W_star - data$Q0W_star)
+  SE <- sd(data$IF) / sqrt(nrow(data))
+  CI_lower <- ATE - 1.96 * SE
+  CI_upper <- ATE + 1.96 * SE
+  
+  return(list(estimate = ATE, se = SE, ci_lower = CI_lower, ci_upper = CI_upper))
+}
+
+estimate_wtmle(data)
+```
+
+## True Causal Effect
+
+```{r}
+true_effect <- exp(a+b+((c+d)^2)/2) - exp(a+(c^2)/2)
+true_effect
+```
+
+### Simulation
+
+```{r}
+compare_estimators_ <- function(sample_sizes, num_sim = 200, scenario = "confounded") {
+  results_list <- vector("list", length(sample_sizes))
+  names(results_list) <- as.character(sample_sizes)
+  
+  for (size_index in seq_along(sample_sizes)) {
+    n <- sample_sizes[size_index]
+    dm_estimates <- numeric(num_sim)
+    ols_estimates <- numeric(num_sim)
+    ipw_estimates <- numeric(num_sim)
+    ose_estimates <- numeric(num_sim)
+    tmle_estimates <- numeric(num_sim)
+    dm_coverage <- numeric(num_sim)
+    ols_coverage <- numeric(num_sim)
+    ipw_coverage <- numeric(num_sim)
+    ose_coverage <- numeric(num_sim)
+    tmle_coverage <- numeric(num_sim)
+    dm_ci_widths <- numeric(num_sim)
+    ols_ci_widths <- numeric(num_sim)
+    ipw_ci_widths <- numeric(num_sim)
+    ose_ci_widths <- numeric(num_sim)
+    tmle_ci_widths <- numeric(num_sim)
+    
+    dm_variances <- numeric(num_sim)
+    ols_variances <- numeric(num_sim)
+    ipw_variances <- numeric(num_sim)
+    ose_variances <- numeric(num_sim)
+    tmle_variances <- numeric(num_sim)
+    
+    for (i in 1:num_sim) {
+      if (scenario == "confounded") {
+        data <- generate_confounded_data(n)
+      } else {
+        data <- generate_unconfounded_data(n)
+      }
+      
+      dm_results <- estimate_dm(data)
+      ols_results <- estimate_ols(data)
+      ipw_results <- estimate_ipw_(data)
+      ose_results <- estimate_ose(data)
+      tmle_results <- estimate_tmle(data)
+      
+      dm_estimates[i] <- dm_results$estimate
+      ols_estimates[i] <- ols_results$estimate
+      ipw_estimates[i] <- ipw_results$estimate
+      ose_estimates[i] <- ose_results$estimate
+      tmle_estimates[i] <- tmle_results$estimate
+      
+      dm_coverage[i] <- (true_effect >= dm_results$ci_lower) & (true_effect <= dm_results$ci_upper)
+      ols_coverage[i] <- (true_effect >= ols_results$ci_lower) & (true_effect <= ols_results$ci_upper)
+      ipw_coverage[i] <- (true_effect >= ipw_results$ci_lower) & (true_effect <= ipw_results$ci_upper)
+      ose_coverage[i] <- (true_effect >= ose_results$ci_lower) & (true_effect <= ose_results$ci_upper)
+      tmle_coverage[i] <- (true_effect >= tmle_results$ci_lower) & (true_effect <= tmle_results$ci_upper)
+      
+      dm_ci_widths[i] <- dm_results$ci_upper - dm_results$ci_lower
+      ols_ci_widths[i] <- ols_results$ci_upper - ols_results$ci_lower
+      ipw_ci_widths[i] <- ipw_results$ci_upper - ipw_results$ci_lower
+      ose_ci_widths[i] <- ose_results$ci_upper - ose_results$ci_lower
+      tmle_ci_widths[i] <- tmle_results$ci_upper - tmle_results$ci_lower
+      
+      if (i > 1) {
+        dm_variances[i] <- var(dm_estimates[1:i])
+        ols_variances[i] <- var(ols_estimates[1:i])
+        ipw_variances[i] <- var(ipw_estimates[1:i])
+        ose_variances[i] <- var(ose_estimates[1:i])
+        tmle_variances[i] <- var(tmle_estimates[1:i])
+      }
+    }
+    
+    dm_variance <- mean(dm_variances[2:num_sim]) 
+    ols_variance <- mean(ols_variances[2:num_sim])
+    ipw_variance <- mean(ipw_variances[2:num_sim])
+    ose_variance <- mean(ose_variances[2:num_sim])
+    tmle_variance <- mean(tmle_variances[2:num_sim])
+    
+    dm_rmse <- sqrt(mean((dm_estimates - true_effect)^2))
+    ols_rmse <- sqrt(mean((ols_estimates - true_effect)^2))
+    ipw_rmse <- sqrt(mean((ipw_estimates - true_effect)^2))
+    ose_rmse <- sqrt(mean((ose_estimates - true_effect)^2))
+    tmle_rmse <- sqrt(mean((tmle_estimates - true_effect)^2))
+    
+    results_list[[size_index]] <- data.frame(
+      Sample_Size = rep(n, 5),
+      Estimator = rep(c("DM", "OLS", "IPW", "OSE", "TMLE"), each = num_sim),
+      Estimate = c(dm_estimates, ols_estimates, ipw_estimates, ose_estimates, tmle_estimates),
+      Variance = c(rep(dm_variance, num_sim), rep(ols_variance, num_sim), rep(ipw_variance, num_sim), rep(ose_variance, num_sim), rep(tmle_variance, num_sim)),
+      
+      RMSE = c(rep(dm_rmse, num_sim), rep(ols_rmse, num_sim), rep(ipw_rmse, num_sim), rep(ose_rmse, num_sim), rep(tmle_rmse, num_sim)),
+      Coverage = c(dm_coverage, ols_coverage, ipw_coverage, ose_coverage, tmle_coverage),
+      CI_Width = c(dm_ci_widths, ols_ci_widths, ipw_ci_widths, ose_ci_widths, tmle_ci_widths)
+    )
+  }
+  
+  results_df <- do.call(rbind, results_list)
+  return(results_df)
+}
+
+results_df_conf_ <- compare_estimators_(sample_sizes, num_sim = 200, scenario = "confounded")
+
+```
+
+## Simulations and Plots
+
+```{r}
+summary_df_conf <- results_df_conf_ %>%
+  group_by(Sample_Size, Estimator) %>%
+  summarize(
+    Mean_Estimate = mean(Estimate),
+    Bias = mean(Estimate - true_effect),
+    Variance = mean(Variance),
+    Bias.to.se = Bias/sqrt(Variance),
+    RMSE = mean(RMSE),
+    Coverage = mean(Coverage),
+    Mean_CI_Width = mean(CI_Width),
+    .groups = 'drop'
+  )
+
+kable(summary_df_conf, caption = "Performance Metrics for DM ,IPW ,OLS, OSE and TMLE Estimators Across Different Sample Sizes")
+```
+
+```{r}
+# Select dataset
+summary_df <- summary_df_conf
+
+# Bias Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Bias, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Bias Across Sample Sizes", x = "Log of Sample Size", y = "Bias")
+
+# Variance Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Variance, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Variance Across Sample Sizes", x = "Log of Sample Size", y = "Variance")
+
+# Bias.to.se Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Bias.to.se, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Bias-to-se Ratio Across Sample Sizes", x = "Log of Sample Size", y = "Bias.to.se")
+
+# RMSE Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = RMSE, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "RMSE Across Sample Sizes", x = "Sample Size", y = "RMSE")
+
+# Coverage Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Coverage, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Coverage Probability Across Sample Sizes", x = "Log of Sample Size", y = "Coverage")
+
+# Confidence Interval Width Plot
+ggplot(summary_df, aes(x = log10(Sample_Size), y = Mean_CI_Width, color = Estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Confidence Interval Width Across Sample Sizes", x = "Log of Sample Size", y = "CI Width")
+```
